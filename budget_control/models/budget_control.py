@@ -8,14 +8,12 @@ from odoo.tools import float_compare
 
 class BudgetControl(models.Model):
     _name = "budget.control"
-    _description = "Budget Control"
     _inherit = ["mail.thread", "mail.activity.mixin"]
+    _description = "Budget Control"
     _order = "analytic_account_id"
 
     name = fields.Char(
         required=True,
-        readonly=True,
-        states={"draft": [("readonly", False)]},
         tracking=True,
     )
     assignee_id = fields.Many2one(
@@ -30,24 +28,18 @@ class BudgetControl(models.Model):
         ],
         tracking=True,
         copy=False,
-        readonly=True,
-        states={"draft": [("readonly", False)]},
     )
     budget_period_id = fields.Many2one(
         comodel_name="budget.period",
         help="Budget Period that inline with date from/to",
         ondelete="restrict",
-        readonly=True,
     )
     date_from = fields.Date(related="budget_period_id.bm_date_from")
     date_to = fields.Date(related="budget_period_id.bm_date_to")
-    active = fields.Boolean(
-        default=True,
-    )
+    active = fields.Boolean(default=True)
     analytic_account_id = fields.Many2one(
         comodel_name="account.analytic.account",
         required=True,
-        readonly=True,
         tracking=True,
         ondelete="restrict",
     )
@@ -62,23 +54,14 @@ class BudgetControl(models.Model):
         string="Budget Lines",
         copy=True,
         context={"active_test": False},
-        readonly=True,
-        states={
-            "draft": [("readonly", False)],
-            "submit": [("readonly", False)],
-        },
     )
     plan_date_range_type_id = fields.Many2one(
         comodel_name="date.range.type",
         string="Plan Date Range",
         required=True,
-        readonly=True,
-        states={"draft": [("readonly", False)]},
     )
     init_budget_commit = fields.Boolean(
         string="Initial Budget By Commitment",
-        readonly=True,
-        states={"draft": [("readonly", False)]},
         help="If checked, the newly created budget control sheet will has "
         "initial budget equal to current budget commitment of its year.",
     )
@@ -86,18 +69,26 @@ class BudgetControl(models.Model):
         comodel_name="res.company",
         default=lambda self: self.env.company,
         required=True,
-        readonly=True,
-        states={"draft": [("readonly", False)]},
     )
+    # company_ids = fields.Many2many(
+    #     comodel_name="res.company",
+    #     related="analytic_account_id.budget_company_ids",
+    #     relation="budget_control_company_rel",
+    #     column1="budget_control_id",
+    #     column2="company_id",
+    #     store=True,
+    #     string="Companies",
+    #     tracking=True,
+    # )
     currency_id = fields.Many2one(
-        comodel_name="res.currency", related="company_id.currency_id"
+        comodel_name="res.currency",
+        required=True,
+        tracking=True,
     )
     allocated_amount = fields.Monetary(
         string="Allocated",
         help="Initial total amount for plan",
         tracking=True,
-        readonly=True,
-        states={"draft": [("readonly", False)]},
     )
     released_amount = fields.Monetary(
         string="Released",
@@ -147,8 +138,6 @@ class BudgetControl(models.Model):
     )
     use_all_kpis = fields.Boolean(
         string="Use All KPIs",
-        readonly=True,
-        states={"draft": [("readonly", False)]},
     )
     template_line_ids = fields.Many2many(
         string="KPIs",  # Template line = 1 KPI, name for users
@@ -156,9 +145,8 @@ class BudgetControl(models.Model):
         relation="budget_template_line_budget_contol_rel",
         column1="budget_control_id",
         column2="template_line_id",
-        domain="[('template_id', '=', template_id)]",
-        readonly=True,
-        states={"draft": [("readonly", False)]},
+        compute="_compute_template_line_ids",
+        store=True,
     )
     state = fields.Selection(
         [
@@ -204,8 +192,10 @@ class BudgetControl(models.Model):
         if analytic_ids:
             analytics = self.env["account.analytic.account"].browse(analytic_ids)
             raise UserError(
-                _("Multiple budget control on the same period for: %s")
-                % ", ".join(analytics.mapped("name"))
+                self.env._(
+                    f"Multiple budget control on the same period for: "
+                    f"{', '.join(analytics.mapped('name'))}"
+                )
             )
 
     @api.depends("analytic_account_id")
@@ -221,8 +211,9 @@ class BudgetControl(models.Model):
         BudgetPeriod = self.env["budget.period"]
         if self.env.context.get("edit_amount", False):
             return
+
         for rec in self.filtered(
-            lambda l: l.budget_period_id.control_level == "analytic_kpi"
+            lambda control: control.budget_period_id.control_level == "analytic_kpi"
         ):
             for line in rec.line_ids:
                 # Filter according to budget_control parameter
@@ -235,23 +226,22 @@ class BudgetControl(models.Model):
                 )
                 if budget_info["amount_balance"] < 0:
                     raise UserError(
-                        _(
-                            "Total amount in KPI {line_name} will result in {amount:,.2f}"
-                        ).format(
-                            line_name=line.name, amount=budget_info["amount_balance"]
+                        self.env._(
+                            f"Total amount in KPI {line.name} will result in "
+                            f"{budget_info['amount_balance']:,.2f}"
                         )
                     )
 
-    @api.onchange("use_all_kpis")
-    def _onchange_use_all_kpis(self):
-        if self.use_all_kpis:
-            self.template_line_ids = self.template_id.line_ids
-        else:
-            self.template_line_ids = False
+    @api.depends("use_all_kpis")
+    def _compute_template_line_ids(self):
+        for rec in self:
+            rec.template_line_ids = False
+            if rec.use_all_kpis:
+                rec.template_line_ids = rec.template_id.line_ids
 
     def action_confirm_state(self):
         return {
-            "name": _("Confirmation"),
+            "name": self.env._("Confirmation"),
             "type": "ir.actions.act_window",
             "res_model": "budget.state.confirmation",
             "view_mode": "form",
@@ -321,7 +311,9 @@ class BudgetControl(models.Model):
     def _get_lines_init_date(self):
         self.ensure_one()
         init_date = min(self.line_ids.mapped("date_from"))
-        return self.line_ids.filtered(lambda l: l.date_from == init_date)
+        return self.line_ids.filtered(
+            lambda line, init_date=init_date: line.date_from == init_date
+        )
 
     def do_init_budget_commit(self, init):
         """Initialize budget with current commitment amount."""
@@ -340,7 +332,7 @@ class BudgetControl(models.Model):
                     q["amount"]
                     for q in query_data
                     if q["amount"] is not None
-                    and q["amount_type"] not in ["1_budget", "8_actual"]
+                    and q["amount_type"] not in ["10_budget", "80_actual"]
                 )
                 line.update({"amount": abs(balance_commit)})
 
@@ -360,7 +352,7 @@ class BudgetControl(models.Model):
                 != 0
             ):
                 raise UserError(
-                    _(
+                    self.env._(
                         "Planning amount should equal to the "
                         "released amount {amount:,.2f} {symbol}"
                     ).format(amount=rec.released_amount, symbol=rec.currency_id.symbol)
@@ -467,7 +459,7 @@ class BudgetControl(models.Model):
         ctx = self._get_context_budget_monitoring()
         domain = self._get_domain_budget_monitoring()
         return {
-            "name": _("Budget Monitoring"),
+            "name": self.env._("Budget Monitoring"),
             "res_model": "budget.monitor.report",
             "view_mode": "pivot,tree,graph",
             "domain": domain,
@@ -492,34 +484,28 @@ class BudgetControl(models.Model):
 
     @api.depends("transfer_item_ids")
     def _compute_transferred_amount(self):
+        # Process all records at once using mapped() instead of looping
         for rec in self:
-            # Get the transfer items where the current budget control is the source
-            from_transfer_items = rec.transfer_item_ids.filtered(
-                lambda l: l.budget_control_from_id == rec
+            # Get amounts in a single query using mapped()
+            amounts = rec.transfer_item_ids.mapped(
+                lambda x, rec=rec: (
+                    x.amount if x.budget_control_to_id == rec else -x.amount
+                )
             )
-            # Get the transfer items where the current budget control is the destination
-            to_transfer_items = rec.transfer_item_ids - from_transfer_items
-            # Calculate the total transferred amount by subtracting the amount transferred
-            total_amount = sum(to_transfer_items.mapped("amount")) - sum(
-                from_transfer_items.mapped("amount")
-            )
-            rec.transferred_amount = total_amount
+            # Sum all amounts at once
+            rec.transferred_amount = sum(amounts)
 
     def action_open_budget_transfer_item(self):
         self.ensure_one()
         ctx = self.env.context.copy()
         ctx.update({"create": False, "edit": False})
-        items = self.transfer_item_ids
-        list_view = self.env.ref("budget_control.view_budget_transfer_item_ref_tree").id
-        form_view = self.env.ref("budget_control.view_budget_transfer_item_ref_form").id
         return {
-            "name": _("Budget Transfer Items"),
+            "name": self.env._("Budget Transfer Items"),
             "type": "ir.actions.act_window",
             "res_model": "budget.transfer.item",
-            "views": [[list_view, "list"], [form_view, "form"]],
-            "view_mode": "list",
+            "view_mode": "list,form",
             "context": ctx,
-            "domain": [("id", "in", items and items.ids or [])],
+            "domain": [("id", "in", self.transfer_item_ids.ids)],
         }
 
 
@@ -534,17 +520,15 @@ class BudgetControlLine(models.Model):
         index=True,
         required=True,
     )
-    name = fields.Char(compute="_compute_name", required=False, readonly=True)
     date_range_id = fields.Many2one(
         comodel_name="date.range",
-        string="Date range",
     )
     date_from = fields.Date(required=True, string="From")
     date_to = fields.Date(required=True, string="To")
-    analytic_account_id = fields.Many2one(
-        comodel_name="account.analytic.account", string="Analytic account"
+    analytic_account_id = fields.Many2one(comodel_name="account.analytic.account")
+    amount = fields.Float(
+        digits="Budget Precision",
     )
-    amount = fields.Float()
     template_line_id = fields.Many2one(
         comodel_name="budget.template.line",
         index=True,
@@ -559,28 +543,12 @@ class BudgetControlLine(models.Model):
         readonly=True,
         store=True,
     )
-    state = fields.Selection(
-        [
-            ("draft", "Draft"),
-            ("submit", "Submitted"),
-            ("done", "Controlled"),
-            ("cancel", "Cancelled"),
-        ],
-        string="Status",
-        compute="_compute_budget_control_state",
-        store=True,
+    currency_id = fields.Many2one(
+        comodel_name="res.currency",
+        related="budget_control_id.currency_id",
         index=True,
     )
-
-    @api.depends("kpi_id")
-    def _compute_name(self):
-        for rec in self:
-            rec.name = rec.kpi_id.display_name
-
-    @api.depends("budget_control_id.state")
-    def _compute_budget_control_state(self):
-        for rec in self:
-            rec.state = rec.budget_control_id.state
+    state = fields.Selection(related="budget_control_id.state", store=True)
 
     @api.depends("budget_control_id.active")
     def _compute_active(self):
